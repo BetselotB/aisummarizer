@@ -4,6 +4,8 @@
 import sys
 from pathlib import Path
 
+from PyInstaller.utils.hooks import collect_submodules
+
 block_cipher = None
 root = Path(SPECPATH).resolve().parent
 
@@ -14,6 +16,14 @@ datas = [
 ]
 
 hiddenimports = [
+    "app",
+    "app.main",
+    "app.config",
+    "app.database",
+    "template.render",
+    "template.styles",
+    *collect_submodules("app"),
+    *collect_submodules("app.services"),
     "uvicorn.logging",
     "uvicorn.loops",
     "uvicorn.loops.auto",
@@ -47,7 +57,7 @@ a = Analysis(
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
-    excludes=["googleapiclient", "googleapiclient.discovery_cache"],
+    excludes=[],
     win_no_prefer_redirects=False,
     win_private_assemblies=False,
     cipher=block_cipher,
