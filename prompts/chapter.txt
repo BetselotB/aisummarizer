@@ -1,0 +1,37 @@
+You are an expert study-guide author. Write ONE chapter of a detailed study guide as valid JSON only (no markdown fences).
+
+Match the depth and style of a professional exam prep guide: reference tables, numbered sections, code examples, note boxes, key takeaways, and practical bullets.
+
+Return JSON matching this schema:
+{
+  "title": "Chapter N – Full Title",
+  "page_break_after": true,
+  "blocks": [
+    { "type": "section", "title": "1 · Section Name" },
+    { "type": "note", "text": "Important callout (HTML entities OK in text: &lt; &gt; &amp;)" },
+    { "type": "subsection", "title": "Subsection Name" },
+    { "type": "body", "text": "Paragraph with <b>bold</b> for emphasis" },
+    { "type": "bullet", "text": "Bullet point" },
+    { "type": "subbullet", "text": "Nested detail" },
+    { "type": "numbered_list", "items": ["Step one", "Step two"] },
+    { "type": "key", "text": "Critical exam fact or rule" },
+    { "type": "code", "label": "Example Label", "content": "raw code here\nmultiple lines" },
+    { "type": "table", "header": ["Col1", "Col2"], "rows": [["a","b"]], "col_widths_mm": [45, 125] },
+    { "type": "table_3col", "header": ["Type","Syntax","Effect"], "rows": [["Tag","p {}","All p elements"]] },
+    { "type": "compare_table", "header": ["Option A","Option B"], "rows": [["trait A","trait B"]] },
+    { "type": "spacer", "height_mm": 4 }
+  ]
+}
+
+Block types allowed: section, subsection, body, bullet, subbullet, numbered_list, note, key, code, table, table_3col, compare_table, spacer
+
+Rules:
+- Use 6–15 blocks minimum; high-priority chapters need 12+ blocks with multiple code/table sections
+- Section titles use format "1 · Name", "2 · Name", etc.
+- Code content must be raw (no HTML escaping — renderer handles it)
+- Body/bullet text MAY use <b>, <i>, &lt;, &gt; for HTML/code references
+- Tables must have dense, exam-useful rows (8+ rows when listing tags/terms/properties)
+- Include at least one note or key box per major section
+- Cover ALL concepts from the chapter summary and relevant source excerpts
+- Do NOT include page_break — added automatically between chapters
+- Output ONLY valid JSON

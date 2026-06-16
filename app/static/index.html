@@ -1,0 +1,133 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="dark">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>AI Study Guide Generator</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link href="https://fonts.googleapis.com/css2?family=DM+Sans:ital,opsz,wght@0,9..40,400;0,9..40,500;0,9..40,600;0,9..40,700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="/static/style.css" />
+</head>
+<body>
+  <div class="app">
+    <header class="header">
+      <div class="brand">
+        <span class="logo">SG</span>
+        <div>
+          <h1>Study Guide</h1>
+          <p>PDF → detailed exam-ready notes</p>
+        </div>
+      </div>
+      <div class="header-actions">
+        <span class="saved-indicator" id="savedIndicator"></span>
+        <button type="button" class="btn ghost icon" id="themeToggle" title="Toggle light/dark">◐</button>
+        <div class="status-pill" id="healthStatus">Checking…</div>
+      </div>
+    </header>
+
+    <main class="grid">
+      <section class="card">
+        <h2>New study guide</h2>
+        <form id="jobForm">
+          <label>
+            Title
+            <input type="text" name="title" id="jobTitle" placeholder="Web Programming Final Exam" required />
+          </label>
+
+          <label class="file-field">
+            PDF files
+            <div class="drop-zone" id="dropZone">
+              <input type="file" accept=".pdf,application/pdf" multiple id="fileInput" hidden />
+              <div class="drop-zone-inner">
+                <span class="drop-icon">+</span>
+                <p class="drop-title">Drag & drop PDFs here</p>
+                <p class="drop-sub">or <button type="button" class="link-btn" id="browseFiles">browse files</button></p>
+                <span class="hint">Each drop or browse adds to the list</span>
+              </div>
+            </div>
+            <ul class="file-list" id="fileList" hidden></ul>
+            <div class="file-actions" id="fileActions" hidden>
+              <button type="button" class="btn ghost" id="clearFiles">Clear all</button>
+            </div>
+          </label>
+
+          <label>
+            Extra context <span class="optional">optional</span>
+            <textarea name="extra_context" id="jobContext" rows="5" placeholder="Exam focus, topics to emphasize, your notes…"></textarea>
+          </label>
+
+          <button type="submit" class="btn primary" id="submitBtn">Generate study guide</button>
+        </form>
+
+        <details class="text-only" id="textOnlyDetails">
+          <summary>Or paste text instead of PDF</summary>
+          <form id="textForm">
+            <label>
+              Title
+              <input type="text" name="title" id="textTitle" placeholder="Chapter notes" required />
+            </label>
+            <label>
+              Source text
+              <textarea name="extra_context" id="textContext" rows="8" required placeholder="Paste notes, article text, etc."></textarea>
+            </label>
+            <button type="submit" class="btn secondary">Generate from text</button>
+          </form>
+        </details>
+      </section>
+
+      <section class="card">
+        <div class="card-head">
+          <h2>Gemini API keys</h2>
+          <span class="badge" id="keyCount">0 keys</span>
+        </div>
+        <p class="desc">Add keys from <strong>different Google accounts</strong> — keys from the same project share one quota.</p>
+
+        <label>
+          Gemini model
+          <select id="geminiModel">
+            <option value="gemini-2.5-flash">gemini-2.5-flash (recommended)</option>
+            <option value="gemini-2.5-flash-lite">gemini-2.5-flash-lite</option>
+            <option value="gemini-2.0-flash">gemini-2.0-flash</option>
+            <option value="gemini-1.5-flash">gemini-1.5-flash</option>
+          </select>
+          <span class="hint">Auto-fallback to other models on rate limits. Daily quota resets midnight PT.</span>
+        </label>
+
+        <form id="bulkKeyForm" class="key-form">
+          <label>
+            Paste keys (one per line)
+            <textarea id="bulkKeys" rows="4" placeholder="AIza…"></textarea>
+          </label>
+          <div class="row">
+            <input type="text" id="keyLabelPrefix" placeholder="Label prefix" value="Gemini" />
+            <button type="submit" class="btn secondary">Add keys</button>
+          </div>
+        </form>
+
+        <ul id="keyList" class="key-list"></ul>
+      </section>
+
+      <section class="card span-2">
+        <div class="card-head">
+          <h2>Jobs</h2>
+          <button class="btn ghost" id="refreshJobs">Refresh</button>
+        </div>
+        <div id="jobList" class="job-list"></div>
+      </section>
+
+      <section class="card span-2">
+        <div class="card-head">
+          <h2>Activity log</h2>
+          <span class="badge" id="activityCount">0 events</span>
+        </div>
+        <p class="desc">Persisted locally and on server — survives refresh and restarts.</p>
+        <ul id="activityList" class="activity-list"></ul>
+      </section>
+    </main>
+  </div>
+
+  <div id="toast" class="toast hidden"></div>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>

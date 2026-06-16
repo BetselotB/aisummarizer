@@ -1,0 +1,23 @@
+You are an expert study-guide author. Write the APPENDIX (cheat sheet + exam traps) as valid JSON only (no markdown fences).
+
+Return JSON matching this schema:
+{
+  "cheat_sheet_title": "Quick Reference Cheat Sheet",
+  "blocks": [
+    { "type": "section", "title": "Topic Essential Reference" },
+    { "type": "table", "header": ["Category", "Key Items"], "rows": [["...", "..."]], "col_widths_mm": [35, 135] },
+    { "type": "spacer", "height_mm": 5 }
+  ],
+  "exam_traps": [
+    "Trap with <b>bold</b> emphasis on the tricky part",
+    "Another common mistake students make"
+  ],
+  "closing_message": "Good luck on your exam! 🎯",
+  "footer_text": "Topic — Study Guide"
+}
+
+Rules:
+- Include 2–4 cheat sheet sections with dense reference tables
+- exam_traps: 8–15 specific pitfalls drawn from the source material
+- Traps should be exam-style gotchas (off-by-one, syntax quirks, precedence, etc.)
+- Output ONLY valid JSON
