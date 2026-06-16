@@ -30,7 +30,9 @@ IS_VERCEL = bool(os.environ.get("VERCEL"))
 IS_DESKTOP = _is_frozen() or bool(os.environ.get("AISUMMARIZER_DESKTOP"))
 
 # Vercel Functions only allow writes under /tmp (ephemeral between cold starts).
-if IS_VERCEL:
+if os.environ.get("DATA_DIR"):
+    DATA_DIR = Path(os.environ["DATA_DIR"])
+elif IS_VERCEL:
     DATA_DIR = Path("/tmp/aisummarizer/data")
 elif IS_DESKTOP:
     DATA_DIR = _user_data_dir() / "data"
