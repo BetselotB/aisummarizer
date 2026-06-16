@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any
 
 from app.config import JOBS_DIR
+from app.services.detail_tiers import get_tier_config, normalize_detail_tier
 
 
 def scan_checkpoint(job_id: str) -> dict[str, Any]:
@@ -15,19 +16,37 @@ def scan_checkpoint(job_id: str) -> dict[str, Any]:
         return {"can_resume": False}
 
     source_path = job_dir / "source.txt"
+    master_plan_path = job_dir / "master_plan.json"
     outline_path = job_dir / "outline.json"
     appendix_path = job_dir / "appendix.json"
     document_path = job_dir / "document.json"
 
+    master_plan = None
+    if master_plan_path.exists():
+        master_plan = json.loads(master_plan_path.read_text(encoding="utf-8"))
+
     chapters_done: list[int] = []
     loaded_chapters: list[dict[str, Any]] = []
+    chapter_sections_done: dict[int, list[int]] = {}
     for path in sorted(job_dir.glob("chapter_*.json")):
+        stem = path.stem
+        if "_sec_" in stem:
+            continue
         try:
-            num = int(path.stem.split("_")[1])
+            num = int(stem.split("_")[1])
         except (IndexError, ValueError):
             continue
         chapters_done.append(num)
         loaded_chapters.append(json.loads(path.read_text(encoding="utf-8")))
+
+    for path in sorted(job_dir.glob("chapter_*_sec_*.json")):
+        parts = path.stem.split("_")
+        try:
+            ch_num = int(parts[1])
+            sec_num = int(parts[3])
+        except (IndexError, ValueError):
+            continue
+        chapter_sections_done.setdefault(ch_num, []).append(sec_num)
 
     outline = None
     if outline_path.exists():
@@ -55,13 +74,20 @@ def scan_checkpoint(job_id: str) -> dict[str, Any]:
         next_step = f"chapter_{next_chapter}"
     elif outline_path.exists():
         next_step = "chapter_1"
+    elif master_plan_path.exists():
+        next_step = "chapter_1"
     elif source_path.exists():
-        next_step = "outline"
+        tier_path = job_dir / "detail_tier.txt"
+        tier = normalize_detail_tier(
+            tier_path.read_text(encoding="utf-8") if tier_path.exists() else None
+        )
+        next_step = "master_plan" if get_tier_config(tier).use_master_plan else "outline"
     else:
         next_step = "extract"
 
     can_resume = (
         source_path.exists()
+        or master_plan_path.exists()
         or outline_path.exists()
         or bool(chapters_done)
         or appendix_path.exists()
@@ -70,13 +96,16 @@ def scan_checkpoint(job_id: str) -> dict[str, Any]:
     return {
         "can_resume": can_resume,
         "has_source": source_path.exists(),
+        "has_master_plan": master_plan_path.exists(),
         "has_outline": outline_path.exists(),
         "has_appendix": appendix_path.exists(),
         "chapters_done": chapters_done,
         "chapters_loaded": loaded_chapters,
+        "chapter_sections_done": chapter_sections_done,
         "chapters_total": total_chapters,
         "next_chapter_index": next_chapter - 1 if next_chapter <= total_chapters else total_chapters,
         "next_step": next_step,
+        "master_plan": master_plan,
         "outline": outline,
         "appendix": appendix,
         "source_path": source_path,

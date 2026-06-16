@@ -1,12 +1,22 @@
-import { useCallback, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { api } from "../api";
-import type { Job } from "../types";
+import type { DetailTier, Job } from "../types";
+
+type Provider = "gemini" | "openrouter" | "grok";
+
+const TIER_OPTIONS: { value: DetailTier; label: string; hint: string }[] = [
+  { value: "concise", label: "Concise", hint: "Quick review — essentials only" },
+  { value: "standard", label: "Standard", hint: "Balanced exam notes" },
+  { value: "detailed", label: "Detailed", hint: "AI master plan + in-depth chapters" },
+  { value: "comprehensive", label: "Comprehensive", hint: "Full section-by-section breakdown" },
+];
 
 interface Props {
   onCreated: (job: Job) => void;
   toast: (msg: string) => void;
   draft: { title: string; context: string };
   onDraftChange: (d: { title: string; context: string }) => void;
+  defaultProvider?: Provider;
 }
 
 function formatSize(bytes: number) {
@@ -15,14 +25,20 @@ function formatSize(bytes: number) {
   return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
 }
 
-export function JobForm({ onCreated, toast, draft, onDraftChange }: Props) {
+export function JobForm({ onCreated, toast, draft, onDraftChange, defaultProvider = "gemini" }: Props) {
   const [files, setFiles] = useState<File[]>([]);
   const [submitting, setSubmitting] = useState(false);
   const [dragOver, setDragOver] = useState(false);
+  const [provider, setProvider] = useState<Provider>(defaultProvider);
   const inputRef = useRef<HTMLInputElement>(null);
   const [textMode, setTextMode] = useState(false);
   const [textTitle, setTextTitle] = useState("");
   const [textBody, setTextBody] = useState("");
+  const [detailTier, setDetailTier] = useState<DetailTier>("standard");
+
+  useEffect(() => {
+    setProvider(defaultProvider);
+  }, [defaultProvider]);
 
   const fileKey = (f: File) => `${f.name}::${f.size}::${f.lastModified}`;
 
@@ -56,6 +72,8 @@ export function JobForm({ onCreated, toast, draft, onDraftChange }: Props) {
       const fd = new FormData();
       fd.append("title", draft.title.trim());
       fd.append("extra_context", draft.context.trim());
+      fd.append("llm_provider", provider);
+      fd.append("detail_tier", detailTier);
       files.forEach((f) => fd.append("files", f, f.name));
       const { job } = await api.jobs.create(fd);
       toast("Job started");
@@ -72,7 +90,7 @@ export function JobForm({ onCreated, toast, draft, onDraftChange }: Props) {
     e.preventDefault();
     setSubmitting(true);
     try {
-      const { job } = await api.jobs.createText(textTitle.trim(), textBody.trim());
+      const { job } = await api.jobs.createText(textTitle.trim(), textBody.trim(), provider, detailTier);
       toast("Text job started");
       onCreated(job);
     } catch (err) {
@@ -87,6 +105,26 @@ export function JobForm({ onCreated, toast, draft, onDraftChange }: Props) {
       <h2>New study guide</h2>
       {!textMode ? (
         <form onSubmit={submitPdf}>
+          <label>
+            AI provider
+            <select value={provider} onChange={(e) => setProvider(e.target.value as Provider)}>
+              <option value="gemini">Gemini</option>
+              <option value="openrouter">OpenRouter</option>
+              <option value="grok">Grok (x.ai)</option>
+            </select>
+          </label>
+
+          <label>
+            Detail level
+            <select value={detailTier} onChange={(e) => setDetailTier(e.target.value as DetailTier)}>
+              {TIER_OPTIONS.map((t) => (
+                <option key={t.value} value={t.value}>
+                  {t.label} — {t.hint}
+                </option>
+              ))}
+            </select>
+          </label>
+
           <label>
             Title
             <input
@@ -168,6 +206,25 @@ export function JobForm({ onCreated, toast, draft, onDraftChange }: Props) {
         </form>
       ) : (
         <form onSubmit={submitText}>
+          <label>
+            AI provider
+            <select value={provider} onChange={(e) => setProvider(e.target.value as Provider)}>
+              <option value="gemini">Gemini</option>
+              <option value="openrouter">OpenRouter</option>
+              <option value="grok">Grok (x.ai)</option>
+            </select>
+          </label>
+          <label>
+            Detail level
+            <select value={detailTier} onChange={(e) => setDetailTier(e.target.value as DetailTier)}>
+              {TIER_OPTIONS.map((t) => (
+                <option key={t.value} value={t.value}>
+                  {t.label} — {t.hint}
+                </option>
+              ))}
+            </select>
+          </label>
+
           <label>
             Title
             <input

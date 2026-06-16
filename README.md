@@ -29,6 +29,46 @@ python run.py
 
 Open **http://localhost:8000**
 
+## Desktop app (Mac / Windows / Linux)
+
+Package as a double-click desktop app with an embedded server and native window — no terminal or browser setup for end users.
+
+### Build (developers)
+
+**macOS / Linux:**
+
+```bash
+chmod +x scripts/build_desktop.sh
+./scripts/build_desktop.sh
+```
+
+**Windows:**
+
+```bat
+scripts\build_desktop.bat
+```
+
+**Output:**
+
+| Platform | Artifact |
+|----------|----------|
+| macOS | `dist/AI Study Guide Generator.app` and `dist/AI-Study-Guide-Generator.dmg` |
+| Windows | `dist/AI Study Guide Generator/AI Study Guide Generator.exe` |
+| Linux | `dist/AI Study Guide Generator/AI Study Guide Generator` |
+
+User data (uploads, jobs, API keys) is stored outside the app bundle:
+
+- **macOS:** `~/Library/Application Support/AI Study Guide Generator/data/`
+- **Windows:** `%LOCALAPPDATA%\AIStudyGuideGenerator\data\`
+- **Linux:** `~/.local/share/aisummarizer/data/`
+
+### Run desktop mode locally (without packaging)
+
+```bash
+pip install -r requirements-desktop.txt
+python desktop.py
+```
+
 **UI dev mode** (hot reload): run `python run.py` in one terminal and `cd frontend && npm run dev` in another (proxies `/api` to :8000).
 
 ### App pages

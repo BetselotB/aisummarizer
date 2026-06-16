@@ -18,12 +18,18 @@ export const api = {
 
   config: {
     get: () =>
-      request<{ gemini_model: string; model_options: string[] }>("/api/config"),
-    set: (gemini_model: string) =>
+      request<{
+        llm_provider: string;
+        gemini_model: string;
+        openrouter_model: string;
+        grok_model: string;
+        model: string;
+      }>("/api/config"),
+    set: (partial: Record<string, string>) =>
       request("/api/config", {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ gemini_model }),
+        body: JSON.stringify(partial),
       }),
   },
 
@@ -62,11 +68,16 @@ export const api = {
     logs: (id: string) => request<{ logs: JobLog[] }>(`/api/jobs/${id}/logs`),
     create: (form: FormData) =>
       request<{ job: Job }>("/api/jobs", { method: "POST", body: form }),
-    createText: (title: string, extra_context: string) =>
+    createText: (
+      title: string,
+      extra_context: string,
+      llm_provider?: string,
+      detail_tier?: string
+    ) =>
       request<{ job: Job }>("/api/jobs/text-only", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ title, extra_context }),
+        body: JSON.stringify({ title, extra_context, llm_provider, detail_tier }),
       }),
     resume: (id: string) =>
       request<{ resume_from: string }>(`/api/jobs/${id}/resume`, {

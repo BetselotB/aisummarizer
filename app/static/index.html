@@ -52,6 +52,17 @@
           </label>
 
           <label>
+            Detail level
+            <select name="detail_tier" id="detailTier">
+              <option value="concise">Concise — quick review, essentials only</option>
+              <option value="standard" selected>Standard — balanced exam notes</option>
+              <option value="detailed">Detailed — in-depth with richer tables</option>
+              <option value="comprehensive">Comprehensive — full AI-planned deep breakdown</option>
+            </select>
+            <span class="hint" id="tierHint">Standard produces balanced chapters with tables, examples, and exam traps.</span>
+          </label>
+
+          <label>
             Extra context <span class="optional">optional</span>
             <textarea name="extra_context" id="jobContext" rows="5" placeholder="Exam focus, topics to emphasize, your notes…"></textarea>
           </label>
@@ -67,6 +78,15 @@
               <input type="text" name="title" id="textTitle" placeholder="Chapter notes" required />
             </label>
             <label>
+              Detail level
+              <select id="textDetailTier">
+                <option value="concise">Concise</option>
+                <option value="standard" selected>Standard</option>
+                <option value="detailed">Detailed</option>
+                <option value="comprehensive">Comprehensive</option>
+              </select>
+            </label>
+            <label>
               Source text
               <textarea name="extra_context" id="textContext" rows="8" required placeholder="Paste notes, article text, etc."></textarea>
             </label>
@@ -77,12 +97,21 @@
 
       <section class="card">
         <div class="card-head">
-          <h2>Gemini API keys</h2>
+          <h2>API keys</h2>
           <span class="badge" id="keyCount">0 keys</span>
         </div>
-        <p class="desc">Add keys from <strong>different Google accounts</strong> — keys from the same project share one quota.</p>
+        <p class="desc">Add <strong>Gemini</strong> (<code>AIza…</code>), <strong>OpenRouter</strong> (<code>sk-or-v1-…</code>), or <strong>Grok</strong> (<code>xai-…</code>) keys.</p>
 
         <label>
+          Provider
+          <select id="llmProvider">
+            <option value="gemini">Gemini (Google AI Studio)</option>
+            <option value="openrouter">OpenRouter (free models)</option>
+            <option value="grok">Grok (x.ai)</option>
+          </select>
+        </label>
+
+        <label id="geminiModelGroup">
           Gemini model
           <select id="geminiModel">
             <option value="gemini-2.5-flash">gemini-2.5-flash (recommended)</option>
@@ -90,16 +119,38 @@
             <option value="gemini-2.0-flash">gemini-2.0-flash</option>
             <option value="gemini-1.5-flash">gemini-1.5-flash</option>
           </select>
-          <span class="hint">Auto-fallback to other models on rate limits. Daily quota resets midnight PT.</span>
+          <span class="hint">Auto-fallback on rate limits. Daily quota resets midnight PT.</span>
+        </label>
+
+        <label id="openrouterModelGroup" hidden>
+          OpenRouter model
+          <select id="openrouterModel">
+            <option value="google/gemini-2.0-flash-exp:free">google/gemini-2.0-flash-exp:free (recommended)</option>
+            <option value="google/gemini-2.5-flash-preview:free">google/gemini-2.5-flash-preview:free</option>
+            <option value="meta-llama/llama-3.3-70b-instruct:free">meta-llama/llama-3.3-70b-instruct:free</option>
+            <option value="openai/gpt-4o-mini">openai/gpt-4o-mini</option>
+            <option value="openai/gpt-4o">openai/gpt-4o</option>
+          </select>
+          <span class="hint">Free models end with <code>:free</code>. Get keys at <a href="https://openrouter.ai/keys" target="_blank" rel="noopener">openrouter.ai/keys</a>.</span>
+        </label>
+
+        <label id="grokModelGroup" hidden>
+          Grok model
+          <select id="grokModel">
+            <option value="grok-4.3">grok-4.3 (recommended)</option>
+            <option value="grok-4">grok-4</option>
+            <option value="grok-3-mini">grok-3-mini</option>
+          </select>
+          <span class="hint">Get keys at <a href="https://console.x.ai" target="_blank" rel="noopener">console.x.ai</a>.</span>
         </label>
 
         <form id="bulkKeyForm" class="key-form">
           <label>
             Paste keys (one per line)
-            <textarea id="bulkKeys" rows="4" placeholder="AIza…"></textarea>
+            <textarea id="bulkKeys" rows="4" placeholder="AIza…, sk-or-v1-…, or xai-…"></textarea>
           </label>
           <div class="row">
-            <input type="text" id="keyLabelPrefix" placeholder="Label prefix" value="Gemini" />
+            <input type="text" id="keyLabelPrefix" placeholder="Label prefix" value="API" />
             <button type="submit" class="btn secondary">Add keys</button>
           </div>
         </form>

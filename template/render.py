@@ -174,6 +174,36 @@ def build_cover(story: list, doc_data: dict[str, Any]) -> None:
         )
         story.append(ft)
 
+    objectives = doc_data.get("learning_objectives") or []
+    if objectives:
+        story.append(_spacer(6))
+        obj_style = ParagraphStyle(
+            "objh",
+            fontName="Helvetica-Bold",
+            fontSize=11,
+            textColor=ACCENT,
+        )
+        items = "<br/>".join(f"• {o}" for o in objectives[:12])
+        ot = Table(
+            [
+                [Paragraph("<b>📋 Learning Objectives</b>", obj_style)],
+                [Paragraph(items, S["body"])],
+            ],
+            colWidths=[W - 36 * mm],
+        )
+        ot.setStyle(
+            TableStyle(
+                [
+                    ("BACKGROUND", (0, 0), (-1, -1), HexColor("#f9fff7")),
+                    ("BOX", (0, 0), (-1, -1), 1.5, HexColor("#4caf50")),
+                    ("TOPPADDING", (0, 0), (-1, -1), 6),
+                    ("BOTTOMPADDING", (0, 0), (-1, -1), 6),
+                    ("LEFTPADDING", (0, 0), (-1, -1), 10),
+                ]
+            )
+        )
+        story.append(ot)
+
     story.append(PageBreak())
 
 

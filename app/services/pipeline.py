@@ -11,16 +11,28 @@ from app import database as db
 from app.config import (
     CHUNK_CHAR_LIMIT,
     GEMINI_INTER_REQUEST_DELAY,
-    GEMINI_MODEL_CHAPTER,
     GEMINI_MODEL_FALLBACKS,
-    GEMINI_MODEL_OUTLINE,
+    GROK_INTER_REQUEST_DELAY,
+    GROK_MODEL_FALLBACKS,
+    OPENROUTER_INTER_REQUEST_DELAY,
+    OPENROUTER_MODEL_FALLBACKS,
     JOBS_DIR,
     OUTPUTS_DIR,
 )
 from app.services.checkpoint import scan_checkpoint
-from app.services.gemini import GeminiClient, load_prompt
+from app.services.detail_tiers import (
+    appendix_tier_addon,
+    chapter_tier_addon,
+    get_tier_config,
+    master_plan_tier_addon,
+    normalize_detail_tier,
+    section_tier_addon,
+    outline_tier_addon,
+)
+from app.services.gemini import load_prompt
 from app.services.job_progress import JobProgress
 from app.services.key_rotator import KeyRotator
+from app.services.llm_client import LLMClient, get_active_provider
 from app.services.pdf_extract import extract_multiple
 from template.render import render_pdf
 
@@ -59,17 +71,34 @@ def _relevant_excerpt(full_source: str, chapter_summary: str, max_chars: int = 4
     return excerpt
 
 
+def _merge_section_blocks(chapter_title: str, sections: list[dict[str, Any]]) -> dict[str, Any]:
+    blocks: list[dict[str, Any]] = []
+    for sec in sections:
+        title = sec.get("section_title") or sec.get("title", "")
+        if title:
+            blocks.append({"type": "section", "title": title})
+        blocks.extend(sec.get("blocks", []))
+        blocks.append({"type": "spacer", "height_mm": 3})
+    return {
+        "title": chapter_title,
+        "page_break_after": True,
+        "blocks": blocks,
+    }
+
+
 class StudyGuidePipeline:
-    def __init__(self, rotator: KeyRotator):
-        self.gemini = GeminiClient(rotator)
+    def __init__(self, rotator: KeyRotator, provider: str | None = None):
+        self.provider = provider or rotator.provider or get_active_provider()
+        self.llm = LLMClient(rotator, self.provider)
         self.outline_prompt = load_prompt("outline")
         self.chapter_prompt = load_prompt("chapter")
         self.appendix_prompt = load_prompt("appendix")
-        saved = db.get_app_state("gemini_model")
-        self.model_outline = saved or GEMINI_MODEL_OUTLINE
-        self.model_chapter = saved or GEMINI_MODEL_CHAPTER
+        self.master_plan_prompt = load_prompt("master_plan")
+        self.chapter_section_prompt = load_prompt("chapter_section")
+        self.model_outline = self.llm.model_outline
+        self.model_chapter = self.llm.model_chapter
 
-    async def _gemini(
+    async def _llm_call(
         self,
         prog: JobProgress,
         prompt: str,
@@ -84,10 +113,15 @@ class StudyGuidePipeline:
             if _log:
                 _log(msg, "warn")
 
-        if GEMINI_INTER_REQUEST_DELAY > 0:
-            await asyncio.sleep(GEMINI_INTER_REQUEST_DELAY)
+        delays = {
+            "openrouter": OPENROUTER_INTER_REQUEST_DELAY,
+            "grok": GROK_INTER_REQUEST_DELAY,
+        }
+        delay = delays.get(self.provider, GEMINI_INTER_REQUEST_DELAY)
+        if delay > 0:
+            await asyncio.sleep(delay)
 
-        result = await self.gemini.generate_json(
+        result = await self.llm.generate_json(
             prompt=prompt,
             system=system,
             model_name=model_name,
@@ -97,18 +131,123 @@ class StudyGuidePipeline:
         prog.increment_api_calls()
         return result
 
+    async def _generate_chapter_single(
+        self,
+        prog: JobProgress,
+        ch_plan: dict[str, Any],
+        document: dict[str, Any],
+        source_text: str,
+        tier_cfg: Any,
+        _log: LogFn,
+    ) -> dict[str, Any]:
+        excerpt = _relevant_excerpt(
+            source_text,
+            ch_plan.get("summary", ""),
+            max_chars=tier_cfg.excerpt_chars,
+        )
+        priority = ch_plan.get("priority", "normal")
+        chapter_user = (
+            f"CHAPTER PLAN:\n{json.dumps(ch_plan, indent=2)}\n\n"
+            f"DOCUMENT TITLE: {document['title']}\n"
+            f"PRIORITY: {priority}\n\n"
+            f"RELEVANT SOURCE EXCERPTS:\n{excerpt}"
+        )
+        system = self.chapter_prompt + chapter_tier_addon(tier_cfg, priority)
+        temp = tier_cfg.chapter_temp + (0.05 if priority == "high" else 0)
+        chapter = await self._llm_call(
+            prog,
+            chapter_user,
+            system,
+            self.model_chapter,
+            temp,
+            _log,
+        )
+        chapter.setdefault("title", ch_plan.get("title", "Chapter"))
+        chapter.setdefault("page_break_after", True)
+        return chapter
+
+    async def _generate_chapter_comprehensive(
+        self,
+        prog: JobProgress,
+        job_dir: Path,
+        ch_num: int,
+        ch_plan: dict[str, Any],
+        document: dict[str, Any],
+        source_text: str,
+        tier_cfg: Any,
+        done_sections: set[int],
+        _log: LogFn,
+    ) -> dict[str, Any]:
+        sections_plan = ch_plan.get("sections") or []
+        ch_title = ch_plan.get("title", f"Chapter {ch_num}")
+
+        if not sections_plan:
+            _log(f"Chapter {ch_num}: no section plan — falling back to single-pass generation", "warn")
+            return await self._generate_chapter_single(
+                prog, ch_plan, document, source_text, tier_cfg, _log
+            )
+
+        section_results: list[dict[str, Any]] = []
+        total_secs = len(sections_plan)
+        excerpt = _relevant_excerpt(
+            source_text,
+            ch_plan.get("summary", "") + " " + " ".join(
+                c for s in sections_plan for c in s.get("key_concepts", [])
+            ),
+            max_chars=tier_cfg.excerpt_chars,
+        )
+
+        for sec_idx, sec_plan in enumerate(sections_plan):
+            sec_num = sec_idx + 1
+            sec_path = job_dir / f"chapter_{ch_num}_sec_{sec_num}.json"
+
+            if sec_num in done_sections and sec_path.exists():
+                section_results.append(json.loads(sec_path.read_text(encoding="utf-8")))
+                continue
+
+            _log(f"  Section {sec_num}/{total_secs}: {sec_plan.get('title', sec_plan.get('id', ''))}")
+            section_user = (
+                f"SECTION PLAN:\n{json.dumps(sec_plan, indent=2)}\n\n"
+                f"CHAPTER CONTEXT:\n{json.dumps({'title': ch_title, 'summary': ch_plan.get('summary', '')}, indent=2)}\n\n"
+                f"DOCUMENT TITLE: {document['title']}\n\n"
+                f"RELEVANT SOURCE EXCERPTS:\n{excerpt}"
+            )
+            system = self.chapter_section_prompt + section_tier_addon(tier_cfg)
+            section = await self._llm_call(
+                prog,
+                section_user,
+                system,
+                self.model_chapter,
+                tier_cfg.chapter_temp,
+                _log,
+            )
+            section.setdefault("section_title", sec_plan.get("title", f"Section {sec_num}"))
+            sec_path.write_text(json.dumps(section, indent=2), encoding="utf-8")
+            section_results.append(section)
+
+        return _merge_section_blocks(ch_title, section_results)
+
     async def run(
         self,
         job_id: str,
         title: str,
         source_paths: list[str],
         extra_context: str = "",
+        detail_tier: str | None = None,
         log: LogFn | None = None,
         resume: bool = False,
     ) -> dict[str, Any]:
         job_dir = JOBS_DIR / job_id
         job_dir.mkdir(parents=True, exist_ok=True)
+        tier = normalize_detail_tier(detail_tier)
+        tier_cfg = get_tier_config(tier)
+        (job_dir / "detail_tier.txt").write_text(tier, encoding="utf-8")
         prog = JobProgress(job_id)
+        if resume:
+            if not prog.stats.get("steps"):
+                prog.configure_tier(tier_cfg.use_master_plan)
+        else:
+            prog.configure_tier(tier_cfg.use_master_plan)
         checkpoint = scan_checkpoint(job_id) if resume else {"can_resume": False}
 
         def _log(msg: str, level: str = "info") -> None:
@@ -128,6 +267,8 @@ class StudyGuidePipeline:
             prog.begin_resume(checkpoint)
         else:
             prog.start(file_names)
+
+        _log(f"Detail tier: {tier_cfg.label} ({tier_cfg.id})")
 
         # ── Source text ─────────────────────────────────────────────────────
         if resume and checkpoint["has_source"]:
@@ -150,41 +291,85 @@ class StudyGuidePipeline:
         if not resume or not checkpoint["has_source"]:
             prog.set_source_chars(len(source_text))
 
-        _log(f"Using model: {self.model_outline} (fallbacks: {', '.join(GEMINI_MODEL_FALLBACKS)})")
+        fallbacks_map = {
+            "openrouter": OPENROUTER_MODEL_FALLBACKS,
+            "grok": GROK_MODEL_FALLBACKS,
+        }
+        fallbacks = fallbacks_map.get(self.provider, GEMINI_MODEL_FALLBACKS)
+        _log(f"Using provider: {self.provider} · model: {self.model_outline} (fallbacks: {', '.join(fallbacks)})")
 
-        # ── Outline ─────────────────────────────────────────────────────────
-        if resume and checkpoint["has_outline"] and checkpoint["outline"]:
-            outline = checkpoint["outline"]
-            _log(f"Loaded cached outline ({len(outline.get('chapters', []))} chapters)")
-            if not prog.stats.get("chapters_total"):
-                prog.stats["chapters_total"] = len(outline.get("chapters", []))
-                prog._save()
+        outline: dict[str, Any]
+
+        # ── Master plan (detailed / comprehensive) ──────────────────────────
+        if tier_cfg.use_master_plan:
+            if resume and checkpoint["has_master_plan"] and checkpoint["master_plan"]:
+                outline = checkpoint["master_plan"]
+                _log(f"Loaded cached master plan ({len(outline.get('chapters', []))} chapters)")
+                if not prog.stats.get("chapters_total"):
+                    prog.stats["chapters_total"] = len(outline.get("chapters", []))
+                    prog._save()
+            else:
+                prog.start_master_plan()
+                source_for_plan = _truncate_source(source_text)
+                _log(f"Calling {self.provider} for master plan ({tier_cfg.label})")
+                master_user = (
+                    f"Document title hint: {title}\n\n"
+                    f"SOURCE MATERIAL:\n{source_for_plan}"
+                )
+                system = self.master_plan_prompt + master_plan_tier_addon(tier_cfg, extra_context)
+                outline = await self._llm_call(
+                    prog,
+                    master_user,
+                    system,
+                    self.model_outline,
+                    tier_cfg.outline_temp,
+                    _log,
+                )
+                (job_dir / "master_plan.json").write_text(
+                    json.dumps(outline, indent=2), encoding="utf-8"
+                )
+                db.update_job(job_id, outline_json=json.dumps(outline))
+                (job_dir / "outline.json").write_text(json.dumps(outline, indent=2), encoding="utf-8")
+                chapters_plan = outline.get("chapters", [])
+                prog.finish_master_plan(chapters_plan)
+                _log(f"Master plan ready: {len(chapters_plan)} chapters, section-level structure")
         else:
-            source_for_outline = _truncate_source(source_text)
-            _log("Calling Gemini for outline")
-            outline = await self._gemini(
-                prog,
-                f"Document title hint: {title}\n\nSOURCE MATERIAL:\n{source_for_outline}",
-                self.outline_prompt,
-                self.model_outline,
-                0.3,
-                _log,
-            )
-            db.update_job(job_id, outline_json=json.dumps(outline))
-            (job_dir / "outline.json").write_text(json.dumps(outline, indent=2), encoding="utf-8")
-            chapters_plan = outline.get("chapters", [])
-            prog.finish_outline(chapters_plan)
-            _log(f"Outline ready: {len(chapters_plan)} chapters")
+            # ── Outline (concise / standard) ────────────────────────────────
+            if resume and checkpoint["has_outline"] and checkpoint["outline"]:
+                outline = checkpoint["outline"]
+                _log(f"Loaded cached outline ({len(outline.get('chapters', []))} chapters)")
+                if not prog.stats.get("chapters_total"):
+                    prog.stats["chapters_total"] = len(outline.get("chapters", []))
+                    prog._save()
+            else:
+                source_for_outline = _truncate_source(source_text)
+                _log(f"Calling {self.provider} for outline")
+                outline = await self._llm_call(
+                    prog,
+                    f"Document title hint: {title}\n\nSOURCE MATERIAL:\n{source_for_outline}",
+                    self.outline_prompt + outline_tier_addon(tier_cfg),
+                    self.model_outline,
+                    tier_cfg.outline_temp,
+                    _log,
+                )
+                db.update_job(job_id, outline_json=json.dumps(outline))
+                (job_dir / "outline.json").write_text(json.dumps(outline, indent=2), encoding="utf-8")
+                chapters_plan = outline.get("chapters", [])
+                prog.finish_outline(chapters_plan)
+                _log(f"Outline ready: {len(chapters_plan)} chapters")
 
         chapters_plan = outline.get("chapters", [])
 
         document: dict[str, Any] = {
             "title": outline.get("title", title),
-            "subtitle": outline.get("subtitle", "Study Guide"),
+            "subtitle": outline.get("subtitle", tier_cfg.subtitle_suffix),
             "scope": outline.get("scope", ""),
             "focus_areas": outline.get("focus_areas", ""),
+            "detail_tier": tier,
             "chapters": [],
         }
+        if outline.get("learning_objectives"):
+            document["learning_objectives"] = outline["learning_objectives"]
 
         # Load completed chapters from checkpoint files
         if resume and checkpoint["chapters_loaded"]:
@@ -204,25 +389,23 @@ class StudyGuidePipeline:
             prog.start_chapter(idx, ch_title, pct)
             _log(f"Generating chapter {ch_num}/{total}: {ch_title}")
 
-            excerpt = _relevant_excerpt(source_text, ch_plan.get("summary", ""))
-            priority = ch_plan.get("priority", "normal")
-            chapter_user = (
-                f"CHAPTER PLAN:\n{json.dumps(ch_plan, indent=2)}\n\n"
-                f"DOCUMENT TITLE: {document['title']}\n"
-                f"PRIORITY: {priority}\n\n"
-                f"RELEVANT SOURCE EXCERPTS:\n{excerpt}"
-            )
-            temp = 0.45 if priority == "high" else 0.35
-            chapter = await self._gemini(
-                prog,
-                chapter_user,
-                self.chapter_prompt,
-                self.model_chapter,
-                temp,
-                _log,
-            )
-            chapter.setdefault("title", ch_title)
-            chapter.setdefault("page_break_after", True)
+            if tier_cfg.split_chapters:
+                done_sections = set(checkpoint.get("chapter_sections_done", {}).get(ch_num, []))
+                chapter = await self._generate_chapter_comprehensive(
+                    prog,
+                    job_dir,
+                    ch_num,
+                    ch_plan,
+                    document,
+                    source_text,
+                    tier_cfg,
+                    done_sections,
+                    _log,
+                )
+            else:
+                chapter = await self._generate_chapter_single(
+                    prog, ch_plan, document, source_text, tier_cfg, _log
+                )
 
             if idx < len(document["chapters"]):
                 document["chapters"][idx] = chapter
@@ -248,18 +431,18 @@ class StudyGuidePipeline:
                 f"FULL OUTLINE:\n{json.dumps(outline, indent=2)}\n\n"
                 f"SOURCE SUMMARY (truncated):\n{_truncate_source(source_text, 60_000)}"
             )
-            appendix = await self._gemini(
+            appendix = await self._llm_call(
                 prog,
                 appendix_user,
-                self.appendix_prompt,
+                self.appendix_prompt + appendix_tier_addon(tier_cfg),
                 self.model_chapter,
-                0.35,
+                tier_cfg.chapter_temp,
                 _log,
             )
             appendix.setdefault(
                 "cheat_sheet_title", appendix_plan.get("cheat_sheet_title", "Quick Reference")
             )
-            appendix.setdefault("footer_text", f"{document['title']} — Study Guide")
+            appendix.setdefault("footer_text", f"{document['title']} — {tier_cfg.subtitle_suffix}")
             document["appendix"] = appendix
             prog.finish_appendix()
             (job_dir / "appendix.json").write_text(json.dumps(appendix, indent=2), encoding="utf-8")
@@ -283,5 +466,9 @@ class StudyGuidePipeline:
             started_at=prog.stats.get("started_at"),
             finished_at=prog.stats.get("finished_at"),
         )
-        db.log_activity("job_completed", f"Study guide ready: {title}", {"job_id": job_id})
+        db.log_activity(
+            "job_completed",
+            f"Study guide ready ({tier_cfg.label}): {title}",
+            {"job_id": job_id, "detail_tier": tier},
+        )
         return document

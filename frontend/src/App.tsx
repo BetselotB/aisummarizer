@@ -134,9 +134,9 @@ export default function App() {
           >
             {theme === "dark" ? "◐" : "●"}
           </button>
-          <div className={`status-pill ${health && health.gemini_keys > 0 ? "ok" : "bad"}`}>
+          <div className={`status-pill ${health && (health.api_keys ?? health.gemini_keys) > 0 ? "ok" : "bad"}`}>
             {health
-              ? `${health.gemini_keys} keys · ${health.gemini_model?.split("-").slice(1).join("-") || "?"}`
+              ? `${health.llm_provider || "gemini"} · ${health.api_keys ?? health.gemini_keys} keys · ${health.model || health.gemini_model || "?"}`
               : "…"}
           </div>
         </div>
@@ -150,10 +150,14 @@ export default function App() {
               toast={toast}
               draft={draft}
               onDraftChange={setDraft}
+              defaultProvider={(health?.llm_provider as "gemini" | "openrouter" | "grok") || "gemini"}
             />
             <KeysPanel
               keys={keys}
-              model={health?.gemini_model || "gemini-2.5-flash"}
+              provider={health?.llm_provider || "gemini"}
+              geminiModel={health?.gemini_model || "gemini-2.5-flash"}
+              openrouterModel={health?.openrouter_model || "google/gemini-2.0-flash-exp:free"}
+              grokModel={health?.grok_model || "grok-4.3"}
               onRefresh={refresh}
               toast={toast}
             />
@@ -168,7 +172,10 @@ export default function App() {
           <div className="grid single">
             <KeysPanel
               keys={keys}
-              model={health?.gemini_model || "gemini-2.5-flash"}
+              provider={health?.llm_provider || "gemini"}
+              geminiModel={health?.gemini_model || "gemini-2.5-flash"}
+              openrouterModel={health?.openrouter_model || "google/gemini-2.0-flash-exp:free"}
+              grokModel={health?.grok_model || "grok-4.3"}
               onRefresh={refresh}
               toast={toast}
             />

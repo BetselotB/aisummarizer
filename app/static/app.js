@@ -1,3 +1,10 @@
+const TIER_HINTS = {
+  concise: "Short chapters, key facts only — fastest to generate.",
+  standard: "Balanced chapters with tables, examples, and exam traps.",
+  detailed: "AI master plan first, then richer in-depth chapters.",
+  comprehensive: "Full AI structural plan, then section-by-section deep notes — best for exams.",
+};
+
 const $ = (sel) => document.querySelector(sel);
 const LS_KEY = "aisg_v1";
 
@@ -35,12 +42,12 @@ function scheduleServerSync(state) {
   clearTimeout(saveTimer);
   saveTimer = setTimeout(async () => {
     try {
-      const { theme, jobTitle, jobContext, textTitle, textContext, keyLabelPrefix, fileNames, geminiModel } = state;
+      const { theme, jobTitle, jobContext, textTitle, textContext, keyLabelPrefix, fileNames, geminiModel, openrouterModel, grokModel, llmProvider, detailTier, textDetailTier } = state;
       await api("/api/state", {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          state: { theme, jobTitle, jobContext, textTitle, textContext, keyLabelPrefix, fileNames, geminiModel },
+          state: { theme, jobTitle, jobContext, textTitle, textContext, keyLabelPrefix, fileNames, geminiModel, openrouterModel, grokModel, llmProvider, detailTier, textDetailTier },
         }),
       });
     } catch { /* offline ok */ }
@@ -61,6 +68,19 @@ async function restoreState() {
   if (state.textContext) $("#textContext").value = state.textContext;
   if (state.keyLabelPrefix) $("#keyLabelPrefix").value = state.keyLabelPrefix;
   if (state.geminiModel && $("#geminiModel")) $("#geminiModel").value = state.geminiModel;
+  if (state.openrouterModel && $("#openrouterModel")) $("#openrouterModel").value = state.openrouterModel;
+  if (state.grokModel && $("#grokModel")) $("#grokModel").value = state.grokModel;
+  if (state.llmProvider && $("#llmProvider")) {
+    $("#llmProvider").value = state.llmProvider;
+    updateProviderUI(state.llmProvider);
+  }
+  if (state.detailTier && $("#detailTier")) {
+    $("#detailTier").value = state.detailTier;
+    updateTierHint(state.detailTier);
+  }
+  if (state.textDetailTier && $("#textDetailTier")) {
+    $("#textDetailTier").value = state.textDetailTier;
+  }
   if (state.fileNames?.length) {
     const zone = $("#dropZone");
     if (zone) zone.querySelector(".drop-title").textContent =
@@ -92,6 +112,11 @@ function bindAutoSave() {
     if (!el) continue;
     el.addEventListener("input", () => saveLocalState({ [key]: el.value }));
   }
+}
+
+function updateTierHint(tier) {
+  const hint = $("#tierHint");
+  if (hint) hint.textContent = TIER_HINTS[tier] || TIER_HINTS.standard;
 }
 
 function applyTheme(theme) {
@@ -215,12 +240,22 @@ async function refreshHealth() {
   try {
     const h = await api("/api/health");
     const el = $("#healthStatus");
-    el.textContent = `${h.gemini_keys} keys · ${h.gemini_model || "?"} · ${h.active_jobs.length} running`;
-    el.className = "status-pill " + (h.gemini_keys > 0 ? "ok" : "bad");
-    $("#keyCount").textContent = `${h.gemini_keys} keys`;
-    if (h.gemini_model && $("#geminiModel")) {
-      $("#geminiModel").value = h.gemini_model;
+    const provider = h.llm_provider || "gemini";
+    const model = h.model || h.gemini_model || h.openrouter_model || h.grok_model || "?";
+    const keys = h.api_keys ?? h.gemini_keys ?? 0;
+    el.textContent = `${provider} · ${keys} keys · ${model} · ${h.active_jobs.length} running`;
+    el.className = "status-pill " + (keys > 0 ? "ok" : "bad");
+    const gemini = h.gemini_keys ?? 0;
+    const or = h.openrouter_keys ?? 0;
+    const grok = h.grok_keys ?? 0;
+    $("#keyCount").textContent = `${keys} keys (${gemini} Gemini, ${or} OpenRouter, ${grok} Grok)`;
+    if (h.llm_provider && $("#llmProvider")) {
+      $("#llmProvider").value = h.llm_provider;
+      updateProviderUI(h.llm_provider);
     }
+    if (h.gemini_model && $("#geminiModel")) $("#geminiModel").value = h.gemini_model;
+    if (h.openrouter_model && $("#openrouterModel")) $("#openrouterModel").value = h.openrouter_model;
+    if (h.grok_model && $("#grokModel")) $("#grokModel").value = h.grok_model;
   } catch {
     $("#healthStatus").textContent = "Offline";
     $("#healthStatus").className = "status-pill bad";
@@ -230,28 +265,80 @@ async function refreshHealth() {
 async function loadConfig() {
   try {
     const cfg = await api("/api/config");
-    if (cfg.gemini_model && $("#geminiModel")) {
-      $("#geminiModel").value = cfg.gemini_model;
+    if (cfg.llm_provider && $("#llmProvider")) {
+      $("#llmProvider").value = cfg.llm_provider;
+      updateProviderUI(cfg.llm_provider);
     }
+    if (cfg.gemini_model && $("#geminiModel")) $("#geminiModel").value = cfg.gemini_model;
+    if (cfg.openrouter_model && $("#openrouterModel")) $("#openrouterModel").value = cfg.openrouter_model;
+    if (cfg.grok_model && $("#grokModel")) $("#grokModel").value = cfg.grok_model;
   } catch { /* ignore */ }
 }
 
-function initModelSelector() {
-  const sel = $("#geminiModel");
-  if (!sel) return;
-  sel.addEventListener("change", async () => {
-    try {
-      await api("/api/config", {
-        method: "PUT",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ gemini_model: sel.value }),
-      });
-      saveLocalState({ geminiModel: sel.value });
-      trackActivity(`Model: ${sel.value}`, "config");
-      refreshHealth();
-      toast(`Model set to ${sel.value}`);
-    } catch (err) { toast(err.message); }
+function updateProviderUI(provider) {
+  const geminiGroup = $("#geminiModelGroup");
+  const orGroup = $("#openrouterModelGroup");
+  const grokGroup = $("#grokModelGroup");
+  if (geminiGroup) geminiGroup.hidden = provider !== "gemini";
+  if (orGroup) orGroup.hidden = provider !== "openrouter";
+  if (grokGroup) grokGroup.hidden = provider !== "grok";
+}
+
+async function saveConfig(partial) {
+  await api("/api/config", {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(partial),
   });
+  saveLocalState(partial);
+  refreshHealth();
+}
+
+function initModelSelector() {
+  const providerSel = $("#llmProvider");
+  if (providerSel) {
+    providerSel.addEventListener("change", async () => {
+      try {
+        await saveConfig({ llm_provider: providerSel.value });
+        updateProviderUI(providerSel.value);
+        trackActivity(`Provider: ${providerSel.value}`, "config");
+        toast(`Provider set to ${providerSel.value}`);
+      } catch (err) { toast(err.message); }
+    });
+  }
+
+  const geminiSel = $("#geminiModel");
+  if (geminiSel) {
+    geminiSel.addEventListener("change", async () => {
+      try {
+        await saveConfig({ gemini_model: geminiSel.value });
+        trackActivity(`Gemini model: ${geminiSel.value}`, "config");
+        toast(`Gemini model set to ${geminiSel.value}`);
+      } catch (err) { toast(err.message); }
+    });
+  }
+
+  const orSel = $("#openrouterModel");
+  if (orSel) {
+    orSel.addEventListener("change", async () => {
+      try {
+        await saveConfig({ openrouter_model: orSel.value });
+        trackActivity(`OpenRouter model: ${orSel.value}`, "config");
+        toast(`OpenRouter model set to ${orSel.value}`);
+      } catch (err) { toast(err.message); }
+    });
+  }
+
+  const grokSel = $("#grokModel");
+  if (grokSel) {
+    grokSel.addEventListener("change", async () => {
+      try {
+        await saveConfig({ grok_model: grokSel.value });
+        trackActivity(`Grok model: ${grokSel.value}`, "config");
+        toast(`Grok model set to ${grokSel.value}`);
+      } catch (err) { toast(err.message); }
+    });
+  }
 }
 
 async function loadKeys() {
@@ -264,10 +351,9 @@ async function loadKeys() {
   list.innerHTML = keys.map((k) => `
     <li>
       <div>
-        <div>${escapeHtml(k.label)} ${k.enabled ? "" : "(off)"}</div>
+        <div>${escapeHtml(k.label)} <span class="badge">${k.provider || "?"}</span> ${k.enabled ? "" : "(off)"}</div>
         <div class="meta">${k.masked_key} · ${k.requests_count} calls</div>
         ${k.last_error ? `<div class="meta">${escapeHtml(k.last_error.slice(0, 80))}</div>` : ""}
-        ${!k.masked_key.startsWith("AIza") ? `<div class="meta">⚠ Invalid key format — remove and use AIza… from AI Studio</div>` : ""}
       </div>
       <div class="actions">
         <button class="btn ghost" data-toggle="${k.id}" data-enabled="${k.enabled ? "1" : "0"}">${k.enabled ? "Disable" : "Enable"}</button>
@@ -400,7 +486,7 @@ function renderJob(job) {
     <div class="job-top">
       <div>
         <div class="job-title">${escapeHtml(job.title)}</div>
-        <div class="job-meta">${new Date(job.created_at).toLocaleString()} · ${job.id.slice(0, 8)}</div>
+        <div class="job-meta">${new Date(job.created_at).toLocaleString()} · ${job.id.slice(0, 8)}${job.detail_tier ? ` · <span class="badge">${escapeHtml(job.detail_tier)}</span>` : ""}</div>
       </div>
       <span class="status ${job.status}">${job.status}</span>
     </div>
@@ -495,6 +581,10 @@ $("#jobForm").addEventListener("submit", async (e) => {
   const fd = new FormData();
   fd.append("title", $("#jobTitle").value.trim());
   fd.append("extra_context", $("#jobContext").value.trim());
+  const providerSel = $("#llmProvider");
+  if (providerSel) fd.append("llm_provider", providerSel.value);
+  const tierSel = $("#detailTier");
+  if (tierSel) fd.append("detail_tier", tierSel.value);
   for (const file of selectedFiles) fd.append("files", file, file.name);
   try {
     const { job } = await api("/api/jobs", { method: "POST", body: fd });
@@ -515,7 +605,12 @@ $("#textForm").addEventListener("submit", async (e) => {
     const { job } = await api("/api/jobs/text-only", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ title, extra_context }),
+      body: JSON.stringify({
+        title,
+        extra_context,
+        llm_provider: $("#llmProvider")?.value || "gemini",
+        detail_tier: $("#textDetailTier")?.value || $("#detailTier")?.value || "standard",
+      }),
     });
     trackActivity(`Started text job: ${title}`, "job_started", { job_id: job.id });
     toast("Text job started");
@@ -530,12 +625,12 @@ $("#bulkKeyForm").addEventListener("submit", async (e) => {
     const res = await api("/api/keys/bulk", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ keys_text: $("#bulkKeys").value, label_prefix: $("#keyLabelPrefix").value || "Gemini" }),
+      body: JSON.stringify({ keys_text: $("#bulkKeys").value, label_prefix: $("#keyLabelPrefix").value || "API" }),
     });
     trackActivity(`Added ${res.added} API key(s)`, "keys");
     toast(`Added ${res.added} key(s)`);
     if (res.rejected?.length) {
-      toast(`${res.rejected.length} key(s) rejected — use AIza keys from AI Studio only`);
+      toast(`${res.rejected.length} key(s) rejected — use AIza…, sk-or-v1-…, or xai-… keys`);
     }
     $("#bulkKeys").value = "";
     loadKeys(); refreshHealth(); loadActivity();
@@ -557,10 +652,25 @@ async function poll() {
   if (running) setTimeout(poll, 2500);
 }
 
+function initDetailTier() {
+  const tierSel = $("#detailTier");
+  if (!tierSel) return;
+  tierSel.addEventListener("change", () => {
+    updateTierHint(tierSel.value);
+    saveLocalState({ detailTier: tierSel.value });
+  });
+  const textTier = $("#textDetailTier");
+  if (textTier) {
+    textTier.addEventListener("change", () => saveLocalState({ textDetailTier: textTier.value }));
+  }
+  updateTierHint(tierSel.value);
+}
+
 // ── Boot ────────────────────────────────────────────────────────────────────
 
 initFileUpload();
 initModelSelector();
+initDetailTier();
 bindAutoSave();
 loadConfig();
 restoreState().then(() => {

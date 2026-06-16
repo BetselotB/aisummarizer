@@ -15,21 +15,37 @@ from app.config import IS_VERCEL
 from app.database import init_db
 from app.services.key_rotator import KeyRotator
 from app.services.checkpoint import can_resume_job
+from app.services.key_validation import Provider
+from app.services.llm_client import get_active_provider
 from app.services.pipeline import StudyGuidePipeline
 
 init_db()
 
-_rotator: KeyRotator | None = None
+_rotators: dict[str, KeyRotator] = {}
 _running: dict[str, asyncio.Task] = {}
 
 
-def get_rotator() -> KeyRotator:
-    global _rotator
-    if _rotator is None:
-        _rotator = KeyRotator()
+def _resolve_provider(provider: str | None) -> Provider:
+    if provider in ("gemini", "openrouter", "grok"):
+        return provider  # type: ignore[return-value]
+    return get_active_provider()
+
+
+def get_rotator(provider: Provider | str | None = None) -> KeyRotator:
+    """Return an isolated key pool for the given provider."""
+    resolved = _resolve_provider(provider)
+    rotator = _rotators.get(resolved)
+    if rotator is None:
+        rotator = KeyRotator(provider=resolved)
+        _rotators[resolved] = rotator
     else:
-        _rotator.reload()
-    return _rotator
+        rotator.reload()
+    return rotator
+
+
+def reload_rotators() -> None:
+    for rotator in _rotators.values():
+        rotator.reload()
 
 
 def _internal_job_secret() -> str:
@@ -80,8 +96,12 @@ def _fire_vercel_job(job_id: str, resume: bool) -> None:
 
 
 async def run_job(job_id: str, resume: bool = False) -> None:
-    if job_id in _running and not _running[job_id].done():
+    current = asyncio.current_task()
+    existing = _running.get(job_id)
+    if existing is not None and not existing.done() and existing is not current:
         return
+    if current is not None:
+        _running[job_id] = current
 
     try:
         job = db.get_job(job_id)
@@ -97,27 +117,33 @@ async def run_job(job_id: str, resume: bool = False) -> None:
             db.add_job_log(job_id, "Job started")
             db.log_activity("job_started", f"Job started: {job['title']}", {"job_id": job_id})
 
-        rotator = get_rotator()
+        provider = _resolve_provider(job.get("llm_provider"))
+        rotator = get_rotator(provider)
         if not rotator.has_keys:
             from app.services.job_progress import JobProgress
 
             prog = JobProgress(job_id)
-            prog.fail("No Gemini API keys configured.", "pending")
+            prog.fail(f"No API keys configured for {provider}.", "pending")
             db.update_job(
                 job_id,
                 status="failed",
-                error="No Gemini API keys configured.",
-                message="Failed — no API keys",
+                error=f"No API keys configured for {provider}.",
+                message=f"Failed — no {provider} keys",
             )
-            db.log_activity("job_failed", "Job failed: no API keys", {"job_id": job_id})
+            db.log_activity(
+                "job_failed",
+                f"Job failed: no {provider} keys",
+                {"job_id": job_id},
+            )
             return
 
-        pipeline = StudyGuidePipeline(rotator)
+        pipeline = StudyGuidePipeline(rotator, provider=provider)
         await pipeline.run(
             job_id=job_id,
             title=job["title"],
             source_paths=job["source_files"],
             extra_context=job.get("extra_context") or "",
+            detail_tier=job.get("detail_tier"),
             resume=resume,
         )
     except Exception as exc:
@@ -153,8 +179,17 @@ def start_job(job_id: str, resume: bool = False) -> None:
         ).start()
         return
 
-    task = asyncio.create_task(run_job(job_id, resume=resume))
-    _running[job_id] = task
+    asyncio.create_task(run_job(job_id, resume=resume))
+
+
+def recover_stale_jobs() -> int:
+    """Re-queue jobs left pending after a server restart."""
+    restarted = 0
+    for job in db.list_jobs():
+        if job["status"] == "pending":
+            start_job(job["id"])
+            restarted += 1
+    return restarted
 
 
 def resume_job(job_id: str) -> bool:
@@ -167,8 +202,9 @@ def resume_job(job_id: str) -> bool:
 
 
 def job_status_snapshot() -> dict[str, Any]:
+    rotator = get_rotator()
     return {
         "active_jobs": [jid for jid, t in _running.items() if not t.done()],
-        "keys_loaded": get_rotator().key_count,
+        "keys_loaded": rotator.key_count,
         "vercel": IS_VERCEL,
     }

@@ -45,6 +45,12 @@ export function JobDetail({ job, onResume, resuming }: Props) {
           <h3>{job.title}</h3>
           <p className="meta">
             {new Date(job.created_at).toLocaleString()} · {job.id.slice(0, 8)}
+            {job.llm_provider && (
+              <> · <span className="badge">{job.llm_provider}</span></>
+            )}
+            {job.detail_tier && (
+              <> · <span className="badge">{job.detail_tier}</span></>
+            )}
           </p>
         </div>
         <span className={`status ${job.status}`}>{job.status}</span>

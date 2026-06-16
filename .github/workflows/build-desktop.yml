@@ -1,0 +1,108 @@
+name: Build Desktop Apps
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - "app/**"
+      - "desktop.py"
+      - "packaging/**"
+      - "prompts/**"
+      - "template/**"
+      - "frontend/**"
+      - "requirements*.txt"
+      - ".github/workflows/build-desktop.yml"
+
+jobs:
+  build-macos:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Build frontend
+        run: |
+          cd frontend
+          npm ci
+          npm run build
+
+      - name: Install Python deps
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements-desktop.txt
+
+      - name: Package macOS app
+        run: python -m PyInstaller packaging/aisummarizer.spec --noconfirm
+
+      - name: Create DMG
+        run: |
+          hdiutil create \
+            -volname "AI Study Guide Generator" \
+            -srcfolder "dist/AI Study Guide Generator.app" \
+            -ov -format UDZO \
+            "dist/AI-Study-Guide-Generator.dmg"
+
+      - name: Stage mac release folder
+        run: |
+          mkdir -p releases/desktop/mac
+          cp -R "dist/AI Study Guide Generator.app" releases/desktop/mac/
+          cp "dist/AI-Study-Guide-Generator.dmg" releases/desktop/mac/
+
+      - name: Upload mac artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: desktop-mac
+          path: releases/desktop/mac/
+          retention-days: 30
+
+  build-windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Build frontend
+        run: |
+          cd frontend
+          npm ci
+          npm run build
+
+      - name: Install Python deps
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements-desktop.txt
+
+      - name: Package Windows app
+        run: python -m PyInstaller packaging/aisummarizer.spec --noconfirm
+
+      - name: Stage windows release folder
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path releases/desktop/windows | Out-Null
+          Copy-Item -Recurse -Force "dist/AI Study Guide Generator" releases/desktop/windows/
+
+      - name: Upload windows artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: desktop-windows
+          path: releases/desktop/windows/
+          retention-days: 30

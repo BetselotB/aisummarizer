@@ -1,63 +1,37 @@
-"""Gemini API client with JSON output, model fallback, and key rotation."""
+"""Grok (x.ai) API client with JSON output, model fallback, and key rotation."""
 
 from __future__ import annotations
 
 import asyncio
-import json
 import re
-from pathlib import Path
 from typing import Any
 
-import google.generativeai as genai
-from google.api_core import exceptions as google_exceptions
+import httpx
 
 from app.config import (
-    GEMINI_MAX_RETRIES,
-    GEMINI_MODEL_FALLBACKS,
-    GEMINI_RETRY_BASE_DELAY,
+    GROK_MAX_RETRIES,
+    GROK_MODEL_FALLBACKS,
+    GROK_RETRY_BASE_DELAY,
 )
+from app.services.gemini import _parse_json_response
 from app.services.key_rotator import KeyRotator
 
+
+GROK_API_URL = "https://api.x.ai/v1/responses"
 
 RATE_LIMIT_MARKERS = (
     "429",
     "quota",
     "rate limit",
-    "resource exhausted",
     "too many requests",
-    "limit: 0",
+    "credits",
+    "resource exhausted",
 )
-
-
-def _strip_json_fence(text: str) -> str:
-    text = text.strip()
-    if text.startswith("```"):
-        text = re.sub(r"^```(?:json)?\s*", "", text)
-        text = re.sub(r"\s*```$", "", text)
-    return text.strip()
-
-
-def _parse_json_response(text: str) -> dict[str, Any]:
-    cleaned = _strip_json_fence(text)
-    try:
-        return json.loads(cleaned)
-    except json.JSONDecodeError:
-        match = re.search(r"\{[\s\S]*\}", cleaned)
-        if match:
-            return json.loads(match.group())
-        raise
 
 
 def _is_rate_limit(exc: Exception) -> bool:
     msg = str(exc).lower()
-    if isinstance(exc, google_exceptions.ResourceExhausted):
-        return True
     return any(m in msg for m in RATE_LIMIT_MARKERS)
-
-
-def _is_daily_quota_exhausted(exc: Exception) -> bool:
-    msg = str(exc).lower()
-    return "limit: 0" in msg or "perday" in msg or "per_day" in msg
 
 
 def _parse_retry_seconds(exc: Exception) -> float:
@@ -65,35 +39,44 @@ def _parse_retry_seconds(exc: Exception) -> float:
     m = re.search(r"retry in (\d+(?:\.\d+)?)\s*s", msg, re.I)
     if m:
         return float(m.group(1)) + 1.0
-    m = re.search(r'retry_delay\s*\{\s*seconds:\s*(\d+)', msg)
+    m = re.search(r"retry.after[:\s]+(\d+)", msg, re.I)
     if m:
         return float(m.group(1)) + 1.0
-    return GEMINI_RETRY_BASE_DELAY
+    return GROK_RETRY_BASE_DELAY
 
 
 def _model_chain(preferred: str) -> list[str]:
     seen: set[str] = set()
     chain: list[str] = []
-    for m in [preferred, *GEMINI_MODEL_FALLBACKS]:
+    for m in [preferred, *GROK_MODEL_FALLBACKS]:
         if m and m not in seen:
             seen.add(m)
             chain.append(m)
     return chain
 
 
+def _extract_text(data: dict[str, Any]) -> str:
+    if data.get("output_text"):
+        return str(data["output_text"])
+    for item in data.get("output", []):
+        if item.get("type") != "message":
+            continue
+        for part in item.get("content", []):
+            if part.get("type") == "output_text" and part.get("text"):
+                return str(part["text"])
+    raise RuntimeError("Empty response from Grok")
+
+
 def _friendly_quota_error(exc: Exception, keys_tried: int, models_tried: list[str]) -> str:
-    base = str(exc).split("[links")[0].strip()[:400]
+    base = str(exc)[:400]
     hints = [
-        "Free-tier quota is per Google Cloud project, not per API key — "
-        "multiple keys from the same account/project share one limit.",
-        "Daily quota resets at midnight Pacific Time. Per-minute limits need ~7s between calls.",
-        "Use API keys from different Google accounts/projects, or enable billing on AI Studio.",
+        "Grok API rate limits are per key — add more keys at https://console.x.ai",
         f"Tried {keys_tried} key rotation(s) and models: {', '.join(models_tried)}.",
     ]
     return base + "\n\n" + "\n".join(f"• {h}" for h in hints)
 
 
-class GeminiClient:
+class GrokClient:
     def __init__(self, rotator: KeyRotator):
         self.rotator = rotator
 
@@ -105,11 +88,10 @@ class GeminiClient:
         temperature: float = 0.4,
         on_wait: Any | None = None,
     ) -> dict[str, Any]:
-        full_prompt = f"{system.strip()}\n\n---\n\n{prompt.strip()}"
         models = _model_chain(model_name)
         last_error: Exception | None = None
         attempts = 0
-        max_attempts = max(self.rotator.key_count, 1) * len(models) * GEMINI_MAX_RETRIES
+        max_attempts = max(self.rotator.key_count, 1) * len(models) * GROK_MAX_RETRIES
         models_tried: list[str] = []
         keys_used = 0
 
@@ -130,7 +112,8 @@ class GeminiClient:
                     self._call_sync,
                     api_key,
                     current_model,
-                    full_prompt,
+                    system,
+                    prompt,
                     temperature,
                 )
                 self.rotator.record_success(key_id)
@@ -143,17 +126,12 @@ class GeminiClient:
                     raise
 
                 wait = _parse_retry_seconds(exc)
-                daily = _is_daily_quota_exhausted(exc)
-
                 if on_wait:
-                    label = f"Rate limited on {current_model}"
-                    if daily:
-                        label += " (daily quota) — switching model/key"
-                    await on_wait(wait, label)
+                    await on_wait(wait, f"Rate limited on {current_model} — switching key")
 
                 await asyncio.sleep(wait)
 
-                if daily and len(models) > 1:
+                if len(models) > 1:
                     model_idx += 1
                     if on_wait:
                         await on_wait(0, f"Trying fallback model: {models[model_idx % len(models)]}")
@@ -164,23 +142,33 @@ class GeminiClient:
         raise RuntimeError(_friendly_quota_error(last_error, keys_used, models_tried))
 
     @staticmethod
-    def _call_sync(api_key: str, model_name: str, prompt: str, temperature: float) -> str:
-        genai.configure(api_key=api_key)
-        model = genai.GenerativeModel(
-            model_name,
-            generation_config={
-                "temperature": temperature,
-                "response_mime_type": "application/json",
-            },
-        )
-        response = model.generate_content(prompt)
-        if not response.text:
-            raise RuntimeError("Empty response from Gemini")
-        return response.text
+    def _call_sync(
+        api_key: str,
+        model_name: str,
+        system: str,
+        prompt: str,
+        temperature: float,
+    ) -> str:
+        headers = {
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json",
+        }
+        payload: dict[str, Any] = {
+            "model": model_name,
+            "input": [
+                {"role": "system", "content": system.strip()},
+                {"role": "user", "content": prompt.strip()},
+            ],
+            "temperature": temperature,
+            "text": {"format": {"type": "json_object"}},
+            "store": False,
+        }
 
+        with httpx.Client(timeout=180.0) as client:
+            response = client.post(GROK_API_URL, headers=headers, json=payload)
 
-def load_prompt(name: str) -> str:
-    from app.config import BASE_DIR
+        if response.status_code >= 400:
+            detail = response.text[:500]
+            raise RuntimeError(f"Grok HTTP {response.status_code}: {detail}")
 
-    path = BASE_DIR / "prompts" / f"{name}.txt"
-    return path.read_text(encoding="utf-8")
+        return _extract_text(response.json())

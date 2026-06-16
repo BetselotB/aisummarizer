@@ -11,7 +11,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 from app.config import DB_PATH
-from app.services.key_validation import is_valid_gemini_api_key
+from app.services.key_validation import detect_provider, is_valid_api_key
 
 
 def _utcnow() -> str:
@@ -26,6 +26,7 @@ def init_db() -> None:
                 id TEXT PRIMARY KEY,
                 label TEXT NOT NULL DEFAULT '',
                 api_key TEXT NOT NULL,
+                provider TEXT NOT NULL DEFAULT 'gemini',
                 enabled INTEGER NOT NULL DEFAULT 1,
                 requests_count INTEGER NOT NULL DEFAULT 0,
                 last_used_at TEXT,
@@ -81,26 +82,37 @@ def init_db() -> None:
 
 
 def seed_env_api_keys() -> None:
-    """Load GEMINI_API_KEYS from env (comma or newline separated)."""
-    raw = os.environ.get("GEMINI_API_KEYS", "")
-    if not raw.strip():
-        return
-
+    """Load GEMINI_API_KEYS, OPENROUTER_API_KEYS, and GROK_API_KEYS from env."""
     with get_conn() as conn:
         existing = {
             row["api_key"]
             for row in conn.execute("SELECT api_key FROM api_keys").fetchall()
         }
-        for i, line in enumerate(raw.replace(",", "\n").splitlines(), 1):
-            key = line.strip()
-            if not key or key in existing or not is_valid_gemini_api_key(key):
-                continue
-            key_id = str(uuid.uuid4())
-            conn.execute(
-                "INSERT INTO api_keys (id, label, api_key, created_at) VALUES (?, ?, ?, ?)",
-                (key_id, f"Env Key {i}", key, _utcnow()),
-            )
-            existing.add(key)
+        _seed_keys_from_env(conn, existing, "GEMINI_API_KEYS", "Gemini Env")
+        _seed_keys_from_env(conn, existing, "OPENROUTER_API_KEYS", "OpenRouter Env")
+        _seed_keys_from_env(conn, existing, "GROK_API_KEYS", "Grok Env")
+
+
+def _seed_keys_from_env(
+    conn: sqlite3.Connection,
+    existing: set[str],
+    env_var: str,
+    label_prefix: str,
+) -> None:
+    raw = os.environ.get(env_var, "")
+    if not raw.strip():
+        return
+    for i, line in enumerate(raw.replace(",", "\n").splitlines(), 1):
+        key = line.strip()
+        if not key or key in existing or not is_valid_api_key(key):
+            continue
+        provider = detect_provider(key) or "gemini"
+        key_id = str(uuid.uuid4())
+        conn.execute(
+            "INSERT INTO api_keys (id, label, api_key, provider, created_at) VALUES (?, ?, ?, ?, ?)",
+            (key_id, f"{label_prefix} {i}", key, provider, _utcnow()),
+        )
+        existing.add(key)
 
 
 def _migrate(conn: sqlite3.Connection) -> None:
@@ -111,6 +123,17 @@ def _migrate(conn: sqlite3.Connection) -> None:
         conn.execute("ALTER TABLE jobs ADD COLUMN started_at TEXT")
     if "finished_at" not in cols:
         conn.execute("ALTER TABLE jobs ADD COLUMN finished_at TEXT")
+    if "llm_provider" not in cols:
+        conn.execute("ALTER TABLE jobs ADD COLUMN llm_provider TEXT")
+    if "detail_tier" not in cols:
+        conn.execute("ALTER TABLE jobs ADD COLUMN detail_tier TEXT NOT NULL DEFAULT 'standard'")
+
+    key_cols = {r[1] for r in conn.execute("PRAGMA table_info(api_keys)").fetchall()}
+    if "provider" not in key_cols:
+        conn.execute("ALTER TABLE api_keys ADD COLUMN provider TEXT NOT NULL DEFAULT 'gemini'")
+        for row in conn.execute("SELECT id, api_key FROM api_keys").fetchall():
+            provider = detect_provider(row["api_key"]) or "gemini"
+            conn.execute("UPDATE api_keys SET provider = ? WHERE id = ?", (provider, row["id"]))
 
 
 @contextmanager
@@ -124,13 +147,14 @@ def get_conn():
         conn.close()
 
 
-def add_api_key(label: str, api_key: str) -> dict[str, Any]:
+def add_api_key(label: str, api_key: str, provider: str | None = None) -> dict[str, Any]:
     key_id = str(uuid.uuid4())
     now = _utcnow()
+    resolved = provider or detect_provider(api_key) or "gemini"
     with get_conn() as conn:
         conn.execute(
-            "INSERT INTO api_keys (id, label, api_key, created_at) VALUES (?, ?, ?, ?)",
-            (key_id, label, api_key, now),
+            "INSERT INTO api_keys (id, label, api_key, provider, created_at) VALUES (?, ?, ?, ?, ?)",
+            (key_id, label, api_key, resolved, now),
         )
     return get_api_key(key_id)
 
@@ -138,7 +162,7 @@ def add_api_key(label: str, api_key: str) -> dict[str, Any]:
 def list_api_keys() -> list[dict[str, Any]]:
     with get_conn() as conn:
         rows = conn.execute(
-            "SELECT id, label, enabled, requests_count, last_used_at, last_error, created_at, "
+            "SELECT id, label, provider, enabled, requests_count, last_used_at, last_error, created_at, "
             "substr(api_key, 1, 8) || '…' || substr(api_key, -4) AS masked_key FROM api_keys ORDER BY created_at"
         ).fetchall()
     return [dict(r) for r in rows]
@@ -194,14 +218,19 @@ def create_job(
     source_files: list[str],
     extra_context: str = "",
     job_id: str | None = None,
+    llm_provider: str | None = None,
+    detail_tier: str | None = None,
 ) -> dict[str, Any]:
+    from app.services.detail_tiers import normalize_detail_tier
+
     job_id = job_id or str(uuid.uuid4())
     now = _utcnow()
+    tier = normalize_detail_tier(detail_tier)
     with get_conn() as conn:
         conn.execute(
-            """INSERT INTO jobs (id, title, status, source_files, extra_context, created_at, updated_at)
-               VALUES (?, ?, 'pending', ?, ?, ?, ?)""",
-            (job_id, title, json.dumps(source_files), extra_context, now, now),
+            """INSERT INTO jobs (id, title, status, source_files, extra_context, llm_provider, detail_tier, created_at, updated_at)
+               VALUES (?, ?, 'pending', ?, ?, ?, ?, ?, ?)""",
+            (job_id, title, json.dumps(source_files), extra_context, llm_provider, tier, now, now),
         )
     return get_job(job_id)
 
@@ -229,7 +258,7 @@ def _parse_job(job: dict[str, Any]) -> dict[str, Any]:
 def list_jobs(limit: int = 100) -> list[dict[str, Any]]:
     with get_conn() as conn:
         rows = conn.execute(
-            "SELECT id, title, status, progress, message, error, pdf_path, stats_json, "
+            "SELECT id, title, status, progress, message, error, pdf_path, llm_provider, detail_tier, stats_json, "
             "started_at, finished_at, created_at, updated_at "
             "FROM jobs ORDER BY created_at DESC LIMIT ?",
             (limit,),

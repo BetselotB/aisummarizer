@@ -19,6 +19,8 @@ export interface JobStats {
   elapsed_seconds?: number;
 }
 
+export type DetailTier = "concise" | "standard" | "detailed" | "comprehensive";
+
 export interface Job {
   id: string;
   title: string;
@@ -27,6 +29,8 @@ export interface Job {
   message: string;
   error?: string | null;
   pdf_path?: string | null;
+  llm_provider?: string | null;
+  detail_tier?: DetailTier | string | null;
   created_at: string;
   updated_at: string;
   started_at?: string | null;
@@ -46,6 +50,7 @@ export interface JobLog {
 export interface ApiKey {
   id: string;
   label: string;
+  provider?: string;
   masked_key: string;
   enabled: number;
   requests_count: number;
@@ -62,7 +67,14 @@ export interface Activity {
 export interface Health {
   status: string;
   gemini_keys: number;
+  openrouter_keys?: number;
+  grok_keys?: number;
+  api_keys?: number;
+  llm_provider?: string;
   gemini_model: string;
+  openrouter_model?: string;
+  grok_model?: string;
+  model?: string;
   active_jobs: string[];
 }
 

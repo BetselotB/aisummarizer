@@ -23,13 +23,19 @@ def _elapsed(started_at: str | None) -> int | None:
         return None
 
 
-def _default_steps() -> list[dict[str, Any]]:
-    return [
+def _default_steps(use_master_plan: bool = False) -> list[dict[str, Any]]:
+    steps = [
         {"id": "extract", "label": "Extract text from files", "status": "pending"},
-        {"id": "outline", "label": "Generate outline (Gemini)", "status": "pending"},
+    ]
+    if use_master_plan:
+        steps.append({"id": "master_plan", "label": "AI master plan (structure)", "status": "pending"})
+    else:
+        steps.append({"id": "outline", "label": "Generate outline (AI)", "status": "pending"})
+    steps.extend([
         {"id": "appendix", "label": "Cheat sheet & exam traps", "status": "pending"},
         {"id": "render", "label": "Render PDF (ReportLab)", "status": "pending"},
-    ]
+    ])
+    return steps
 
 
 class JobProgress:
@@ -70,12 +76,15 @@ class JobProgress:
         """Guarantee extract/outline/appendix/render skeleton exists (fixes resume StopIteration)."""
         steps = self.stats.get("steps") or []
         ids = {s.get("id") for s in steps}
-        if {"extract", "outline", "appendix", "render"}.issubset(ids):
+        required = {"extract", "appendix", "render"}
+        has_plan = "master_plan" in ids or "outline" in ids
+        if required.issubset(ids) and has_plan:
             return
 
         preserved = {s["id"]: s for s in steps if s.get("id")}
+        use_master = "master_plan" in preserved
         rebuilt = []
-        for template in _default_steps():
+        for template in _default_steps(use_master):
             sid = template["id"]
             if sid in preserved:
                 rebuilt.append(preserved[sid])
@@ -85,20 +94,59 @@ class JobProgress:
         # Keep any chapter steps that were already present
         chapter_steps = [s for s in steps if str(s.get("id", "")).startswith("chapter_")]
         if chapter_steps:
-            outline_i = next(i for i, s in enumerate(rebuilt) if s["id"] == "outline")
             appendix_i = next(i for i, s in enumerate(rebuilt) if s["id"] == "appendix")
-            rebuilt = rebuilt[: appendix_i] + chapter_steps + rebuilt[appendix_i:]
+            rebuilt = rebuilt[:appendix_i] + chapter_steps + rebuilt[appendix_i:]
 
         self.stats["steps"] = rebuilt
         if not self.stats.get("started_at"):
             self.stats["started_at"] = _utcnow()
 
+    def configure_tier(self, use_master_plan: bool) -> None:
+        self.stats["use_master_plan"] = use_master_plan
+        self.stats["steps"] = _default_steps(use_master_plan)
+        self._save()
+
     def start(self, source_file_names: list[str]) -> None:
         self.stats["started_at"] = _utcnow()
         self.stats["source_file_names"] = source_file_names
-        self.stats["steps"] = _default_steps()
+        if not self.stats.get("steps"):
+            self.stats["steps"] = _default_steps(self.stats.get("use_master_plan", False))
         self._step("extract", "running")
         self._save("Extracting text from files…", 2)
+
+    def start_master_plan(self) -> None:
+        self._ensure_base_steps()
+        self._step("extract", "done")
+        self._step("master_plan", "running")
+        self._save("Building AI master plan…", 6)
+
+    def finish_master_plan(self, chapters: list[dict[str, Any]]) -> None:
+        self._ensure_base_steps()
+        self._step("master_plan", "done")
+        self.stats["chapters_total"] = len(chapters)
+
+        base = self.stats["steps"]
+        if any(s.get("id", "").startswith("chapter_") for s in base):
+            self._save(f"Master plan ready — {len(chapters)} chapters", 12)
+            return
+
+        chapter_steps = [
+            {
+                "id": f"chapter_{i + 1}",
+                "label": ch.get("title", f"Chapter {i + 1}"),
+                "status": "pending",
+            }
+            for i, ch in enumerate(chapters)
+        ]
+
+        appendix_idx = next(
+            (i for i, s in enumerate(base) if s.get("id") == "appendix"),
+            len(base),
+        )
+        self.stats["steps"] = base[:appendix_idx] + chapter_steps + base[appendix_idx:]
+        if chapter_steps:
+            self._step(chapter_steps[0]["id"], "running")
+        self._save(f"Master plan ready — {len(chapters)} chapters", 12)
 
     def set_source_chars(self, n: int) -> None:
         self.stats["source_chars"] = n
@@ -198,14 +246,17 @@ class JobProgress:
                 step.pop("error", None)
                 step.pop("finished_at", None)
 
-        outline = checkpoint.get("outline")
+        outline = checkpoint.get("outline") or checkpoint.get("master_plan")
         chapters = outline.get("chapters", []) if outline else []
         has_chapter_steps = any(
             s.get("id", "").startswith("chapter_") for s in self.stats.get("steps", [])
         )
 
         if outline and chapters and not has_chapter_steps:
-            self.finish_outline(chapters)
+            if checkpoint.get("has_master_plan"):
+                self.finish_master_plan(chapters)
+            else:
+                self.finish_outline(chapters)
 
         if checkpoint.get("has_source"):
             self._step("extract", "done")
@@ -216,8 +267,11 @@ class JobProgress:
                 except OSError:
                     pass
 
-        if checkpoint.get("has_outline"):
-            self._step("outline", "done")
+        if checkpoint.get("has_outline") or checkpoint.get("has_master_plan"):
+            if checkpoint.get("has_master_plan"):
+                self._step("master_plan", "done")
+            else:
+                self._step("outline", "done")
 
         for n in checkpoint.get("chapters_done", []):
             self._step(f"chapter_{n}", "done")
@@ -237,6 +291,8 @@ class JobProgress:
             self._step("appendix", "running")
         elif next_step == "outline":
             self._step("outline", "running")
+        elif next_step == "master_plan":
+            self._step("master_plan", "running")
         elif next_step == "extract":
             self._step("extract", "running")
 
